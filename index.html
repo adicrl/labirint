@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Joc 3D Labirint cu Bilă și Lichid</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #111;
+            font-family: sans-serif;
+            color: white;
+            user-select: none;
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #444;
+        }
+        #hud {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            z-index: 10;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #444;
+            font-size: 18px;
+            font-weight: bold;
+        }
+        select, button {
+            background: #222;
+            color: white;
+            border: 1px solid #666;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 5px;
+            width: 100%;
+        }
+        select:hover, button:hover {
+            background: #444;
+        }
+        #instructions {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px 20px;
+            border-radius: 20px;
+            font-size: 14px;
+            pointer-events: none;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <h3>Setări Labirint</h3>
+        <label for="materialSelect">Alege materialul:</label><br>
+        <select id="materialSelect">
+            <option value="metal">Metal (Greu)</option>
+            <option value="wood">Lemn (Ușor)</option>
+            <option value="rubber">Cauciuc (Elastic)</option>
+            <option value="mercury">Mercur (Lichid)</option>
+        </select>
+        <br><br>
+        <button id="resetBtn">Resetează Poziția</button>
+        <button id="gyroBtn" style="margin-top: 8px; background: #0055aa;">Activează Senzor Telefon</button>
+    </div>
+
+    <div id="hud">Timp: <span id="timer">0.0</span>s</div>
+
+    <div id="instructions">Mișcă mouse-ul (sau înclină telefonul) pentru a ghida bila spre pătratul verde!</div>
+
+    <!-- Three.js CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <script>
+        let scene, camera, renderer, board;
+        let ball;
+        let mercuryDrops = [];
+        let physicsType = 'metal'; 
+        
+        let ballPos = { x: -3.5, z: -3.5 };
+        let ballVel = { x: 0, z: 0 };
+        let ballRadius = 0.3;
+
+        // Control înclinare
+        let targetRotationX = 0;
+        let targetRotationZ = 0;
+        let currentRotationX = 0;
+        let currentRotationZ = 0;
+        let useGyroscope = false;
+
+        // Cronometru și stare joc
+        let startTime = Date.now();
+        let gameFinished = false;
+
+        // Pereții labirintului [x, z, width, depth]
+        const walls = [
+            // Margini exterioare
+            { x: 0, z: -4.5, w: 9, d: 0.3 },
+            { x: 0, z: 4.5, w: 9, d: 0.3 },
+            { x: -4.5, z: 0, w: 0.3, d: 9 },
+            { x: 4.5, z: 0, w: 0.3, d: 9 },
+            // Pereți interiori labirint
+            { x: -2, z: -2, w: 3, d: 0.3 },
+            { x: 2, z: -1, w: 0.3, d: 3 },
+            { x: -1, z: 1, w: 4, d: 0.3 },
+            { x: 1, z: 2.5, w: 0.3, d: 3 },
+            { x: -2.5, z: 2, w: 2, d: 0.3 }
+        ];
+
+        init();
+        animate();
+
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 8, 7);
+            camera.lookAt(0, 0, 0);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(5, 10, 5);
+            dirLight.castShadow = true;
+            scene.add(dirLight);
+
+            const boardGroup = new THREE.Group();
+            
+            const floorGeo = new THREE.BoxGeometry(9, 0.5, 9);
+            const floorMat = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.4 });
+            const floor = new THREE.Mesh(floorGeo, floorMat);
+            floor.position.y = -0.25;
+            floor.receiveShadow = true;
+            boardGroup.add(floor);
+
+            const goalGeo = new THREE.BoxGeometry(1.2, 0.02, 1.2);
+            const goalMat = new THREE.MeshBasicMaterial({ color: 0x00ff66 });
+            const goal = new THREE.Mesh(goalGeo, goalMat);
+            goal.position.set(3.5, 0.01, 3.5);
+            boardGroup.add(goal);
+
+            const wallMat = new THREE.MeshStandardMaterial({ color: 0x557799, roughness: 0.2 });
+            walls.forEach(w => {
+                const wallGeo = new THREE.BoxGeometry(w.w, 0.8, w.d);
+                const wall = new THREE.Mesh(wallGeo, wallMat);
+                wall.position.set(w.x, 0.4, w.z);
+                wall.castShadow = true;
+                wall.receiveShadow = true;
+                boardGroup.add(wall);
+            });
+
+            board = boardGroup;
+            scene.add(board);
+
+            createBallMesh();
+
+            window.addEventListener('resize', onWindowResize);
+            window.addEventListener('mousemove', onMouseMove);
+            
+            document.getElementById('materialSelect').addEventListener('change', (e) => {
+                setPhysicsType(e.target.value);
+            });
+
+            document.getElementById('resetBtn').addEventListener('click', resetGame);
+            
+            document.getElementById('gyroBtn').addEventListener('click', () => {
+                if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                    DeviceOrientationEvent.requestPermission().then(response => {
+                        if (response === 'granted') {
+                            window.addEventListener('deviceorientation', onDeviceOrientation);
+                            useGyroscope = true;
+                            alert("Senzor activat!");
+                        }
+                    }).catch(console.error);
+                } else if (window.DeviceOrientationEvent) {
+                    window.addEventListener('deviceorientation', onDeviceOrientation);
+                    useGyroscope = true;
+                    alert("Senzor activat!");
+                } else {
+                    alert("Senzorul nu este suportat pe acest dispozitiv.");
+                }
+            });
+        }
+
+        function createBallMesh() {
+            if (ball) board.remove(ball);
+            mercuryDrops.forEach(drop => board.remove(drop));
+            mercuryDrops = [];
+
+            if (physicsType === 'mercury') {
+                // Creare picături multiple pentru mercur
+                const dropGeo = new THREE.SphereGeometry(0.12, 16, 16);
+                const dropMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.95, roughness: 0.05 });
+                
+                for (let i = 0; i < 8; i++) {
+                    let drop = {
+                        mesh: new THREE.Mesh(dropGeo, dropMat),
+                        pos: { x: ballPos.x + (Math.random() - 0.5) * 0.3, z: ballPos.z + (Math.random() - 0.5) * 0.3 },
+                        vel: { x: 0, z: 0 }
+                    };
+                    drop.mesh.castShadow = true;
+                    board.add(drop.mesh);
+                    mercuryDrops.push(drop);
+                }
+            } else {
+                let color = 0xaaaaaa, roughness = 0.2, metalness = 0.8;
+                if (physicsType === 'wood') { color = 0x8b5a2b; roughness = 0.8; metalness = 0.1; }
+                else if (physicsType === 'rubber') { color = 0xff3333; roughness = 0.5; metalness = 0.0; }
+
+                const ballGeo = new THREE.SphereGeometry(ballRadius, 32, 32);
+                const ballMat = new THREE.MeshStandardMaterial({ color, roughness, metalness });
+                ball = new THREE.Mesh(ballGeo, ballMat);
+                ball.position.set(ballPos.x, ballRadius, ballPos.z);
+                ball.castShadow = true;
+                board.add(ball);
+            }
+        }
+
+        function setPhysicsType(type) {
+            physicsType = type;
+            resetGame();
+            createBallMesh();
+        }
+
+        function resetGame() {
+            ballPos = { x: -3.5, z: -3.5 };
+            ballVel = { x: 0, z: 0 };
+            startTime = Date.now();
+            gameFinished = false;
+            if (physicsType === 'mercury') {
+                mercuryDrops.forEach((drop, idx) => {
+                    drop.pos = { x: -3.5 + (Math.random() - 0.5) * 0.3, z: -3.5 + (Math.random() - 0.5) * 0.3 };
+                    drop.vel = { x: 0, z: 0 };
+                });
+            }
+        }
+
+        function onMouseMove(event) {
+            if (useGyroscope) return;
+            const centerX = window.innerWidth / 2;
+            const centerY = window.innerHeight / 2;
+            targetRotationZ = (event.clientX - centerX) / centerX * 0.35;
+            targetRotationX = (event.clientY - centerY) / centerY * 0.35;
+        }
+
+        function onDeviceOrientation(event) {
+            // event.beta: înclinare față-spate (-180 la 180)
+            // event.gamma: înclinare stânga-dreapta (-90 la 90)
+            if (event.gamma !== null && event.beta !== null) {
+                targetRotationZ = THREE.MathUtils.clamp(event.gamma / 45, -1, 1) * 0.35;
+                targetRotationX = THREE.MathUtils.clamp(event.beta / 45, -1, 1) * 0.35;
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function handleCollisions(pos, vel, radius, bounce, friction) {
+            vel.x *= friction;
+            vel.z *= friction;
+            pos.x += vel.x;
+            pos.z += vel.z;
+
+            // Coliziuni pereți
+            walls.forEach(w => {
+                const minX = w.x - w.w / 2 - radius;
+                const maxX = w.x + w.w / 2 + radius;
+                const minZ = w.z - w.d / 2 - radius;
+                const maxZ = w.z + w.d / 2 + radius;
+
+                if (pos.x > minX && pos.x < maxX && pos.z > minZ && pos.z < maxZ) {
+                    const prevX = pos.x - vel.x;
+                    const prevZ = pos.z - vel.z;
+
+                    if (prevX <= minX || prevX >= maxX) {
+                        vel.x = -vel.x * bounce;
+                        pos.x = prevX;
+                    }
+                    if (prevZ <= minZ || prevZ >= maxZ) {
+                        vel.z = -vel.z * bounce;
+                        pos.z = prevZ;
+                    }
+                }
+            });
+
+            // Limite exterioare
+            const limit = 4.2;
+            if (pos.x < -limit) { pos.x = -limit; vel.x *= -bounce; }
+            if (pos.x > limit) { pos.x = limit; vel.x *= -bounce; }
+            if (pos.z < -limit) { pos.z = -limit; vel.z *= -bounce; }
+            if (pos.z > limit) { pos.z = limit; vel.z *= -bounce; }
+        }
+
+        function updatePhysics() {
+            if (gameFinished) return;
+
+            const gravity = 0.008;
+            let accX = Math.sin(currentRotationZ) * gravity;
+            let accZ = -Math.sin(currentRotationX) * gravity;
+
+            if (physicsType === 'mercury') {
+                let friction = 0.93;
+                let bounce = 0.15;
+                let radius = 0.12;
+
+                mercuryDrops.forEach(drop => {
+                    drop.vel.x += accX + (Math.random() - 0.5) * 0.001;
+                    drop.vel.z += accZ + (Math.random() - 0.5) * 0.001;
+                    handleCollisions(drop.pos, drop.vel, radius, bounce, friction);
+                    drop.mesh.position.set(drop.pos.x, radius, drop.pos.z);
+                });
+
+                // Verificare victorie pe baza centrului de masă al picăturilor de mercur
+                let avgX = mercuryDrops.reduce((sum, d) => sum + d.pos.x, 0) / mercuryDrops.length;
+                let avgZ = mercuryDrops.reduce((sum, d) => sum + d.pos.z, 0) / mercuryDrops.length;
+                if (avgX > 2.9 && avgX < 4.1 && avgZ > 2.9 && avgZ < 4.1) {
+                    gameFinished = true;
+                    alert("Felicitări! Ai câștigat cu mercurul în " + document.getElementById('timer').innerText + " secunde!");
+                }
+
+            } else {
+                let friction = 0.98;
+                let bounce = 0.2;
+
+                if (physicsType === 'wood') { friction = 0.96; bounce = 0.3; }
+                if (physicsType === 'rubber') { friction = 0.99; bounce = 0.8; }
+
+                ballVel.x += accX;
+                ballVel.z += accZ;
+
+                handleCollisions(ballPos, ballVel, ballRadius, bounce, friction);
+
+                ball.position.x = ballPos.x;
+                ball.position.z = ballPos.z;
+
+                // Verificare victorie bilă
+                if (ballPos.x > 2.9 && ballPos.x < 4.1 && ballPos.z > 2.9 && ballPos.z < 4.1) {
+                    gameFinished = true;
+                    alert("Felicitări! Ai terminat labirintul în " + document.getElementById('timer').innerText + " secunde!");
+                }
+            }
+
+            // Actualizare cronometru
+            let elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+            document.getElementById('timer').innerText = elapsed;
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            currentRotationX += (targetRotationX - currentRotationX) * 0.1;
+            currentRotationZ += (targetRotationZ - currentRotationZ) * 0.1;
+
+            board.rotation.x = currentRotationX;
+            board.rotation.z = currentRotationZ;
+
+            updatePhysics();
+
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
